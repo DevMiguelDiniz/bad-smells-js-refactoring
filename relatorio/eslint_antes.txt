@@ -1,0 +1,7 @@
+
+H:\bad-smells-js-refactoring\src\ReportGenerator.js
+  11:3   error  Refactor this function to reduce its Cognitive Complexity from 27 to the 5 allowed  sonarjs/cognitive-complexity
+  43:14  error  Merge this if statement with the nested one                                         sonarjs/no-collapsible-if
+
+✖ 2 problems (2 errors, 0 warnings)
+

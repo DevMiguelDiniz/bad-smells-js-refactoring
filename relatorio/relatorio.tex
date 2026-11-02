@@ -1,0 +1,132 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazilian]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!8},
+  literate={ã}{{\~a}}1 {á}{{\'a}}1 {é}{{\'e}}1 {ó}{{\'o}}1 {ú}{{\'u}}1 {ç}{{\c c}}1 {í}{{\'i}}1,
+  keepspaces=true
+}
+
+\begin{document}
+
+\begin{titlepage}
+  \centering
+  \vspace*{3cm}
+  {\Large Teste de Software\par}
+  \vspace{1.5cm}
+  {\LARGE\bfseries Detecção de Bad Smells e Refatoração Segura\par}
+  \vspace{3cm}
+  {\large Miguel Figueiredo Diniz\par}
+  {\large Matrícula: 853959\par}
+  \vfill
+  {\small \url{https://github.com/DevMiguelDiniz/bad-smells-js-refactoring}\par}
+  \vspace{1cm}
+\end{titlepage}
+
+\section{Análise de Smells (análise manual)}
+Lendo \texttt{src/ReportGenerator.js} identifiquei três Bad Smells principais.
+
+\paragraph{1) Long Method / complexidade ciclomática alta.} O método \texttt{generateReport} concentra cabeçalho, filtragem por perfil, cálculo de prioridade, formatação das linhas, soma do total e rodapé, com \texttt{for} e \texttt{if/else} aninhados em até 4 níveis. Na manutenção, qualquer alteração exige entender o método inteiro. Nos testes, o número de caminhos (tipo de relatório $\times$ perfil $\times$ valor do item) cresce de forma multiplicativa, e as unidades de lógica não podem ser testadas isoladamente.
+
+\paragraph{2) Código duplicado.} As linhas CSV e HTML e o \texttt{total += item.value} aparecem repetidos nos ramos ADMIN e USER, e o teste do tipo de relatório (CSV/HTML) se repete no cabeçalho, no corpo (duas vezes) e no rodapé. Uma mudança de formato precisa ser feita em vários lugares, com risco de divergência, e cada cópia exige cobertura própria.
+
+\paragraph{3) Condicionais complexas e números mágicos.} As cadeias de \texttt{if/else} por tipo de relatório e por perfil violam o princípio aberto/fechado: um novo formato (ex.: JSON) ou perfil obriga a editar o método e re-testar tudo. Os literais \texttt{1000} (limite de prioridade), \texttt{500} (limite do usuário comum) e as strings \texttt{'ADMIN'}, \texttt{'USER'}, \texttt{'CSV'}, \texttt{'HTML'} não têm nome, então a intenção é implícita. Há ainda um efeito colateral: o método \emph{muta} o item recebido (\texttt{item.priority = true}).
+
+\section{Relatório da Ferramenta (ESLint + SonarJS)}
+Configuração: \texttt{.eslintrc.json} com \texttt{eslint:recommended} e \texttt{plugin:sonarjs/recommended}. O repositório usa o limite de complexidade cognitiva \textbf{5} (o enunciado sugere 15). Saída de \texttt{npx eslint src/} \textbf{antes} da refatoração (\texttt{relatorio/eslint\_antes.txt}):
+
+\begin{lstlisting}
+src\ReportGenerator.js
+  11:3   error  Refactor this function to reduce its Cognitive
+         Complexity from 27 to the 5 allowed  sonarjs/cognitive-complexity
+  43:14  error  Merge this if statement with the nested one
+         sonarjs/no-collapsible-if
+
+2 problems (2 errors, 0 warnings)
+\end{lstlisting}
+
+O SonarJS quantificou o que na leitura manual era apenas uma impressão: a complexidade cognitiva é \textbf{27} contra um limite de 5, ponderando o aninhamento (cada nível extra pesa mais), algo difícil de estimar a olho. Também apontou um \texttt{if} colapsável (linha 43) que passa despercebido por parecer uma regra de negócio legítima. Por outro lado, a ferramenta \textbf{não} detectou números mágicos nem a mutação do parâmetro, achados apenas na análise manual. As duas abordagens são complementares.
+
+\section{Processo de Refatoração}
+O smell mais crítico é o Long Method com condicionais aninhadas e duplicação (complexidade 27).
+
+\paragraph{Antes} (trecho do corpo):
+\begin{lstlisting}[language=JavaScript]
+for (const item of items) {
+  if (user.role === 'ADMIN') {
+    if (item.value > 1000) { item.priority = true; }
+    if (reportType === 'CSV') {
+      report += `${item.id},${item.name},...`;
+      total += item.value;
+    } else if (reportType === 'HTML') {
+      const style = item.priority ? 'style="font-weight:bold;"' : '';
+      report += `<tr ${style}><td>...</td></tr>\n`;
+      total += item.value;
+    }
+  } else if (user.role === 'USER') {
+    if (item.value <= 500) {
+      if (reportType === 'CSV') { /* ...duplicado... */ }
+      else if (reportType === 'HTML') { /* ...duplicado... */ }
+    }
+  }
+}
+\end{lstlisting}
+
+\paragraph{Depois} (\texttt{src/ReportGenerator.refactored.js}):
+\begin{lstlisting}[language=JavaScript]
+generateReport(reportType, user, items) {
+  const formatter = formatters[reportType] ?? emptyFormatter;
+  const visibleItems = this.selectVisibleItems(user, items);
+
+  this.markPriorityItems(user, visibleItems);
+
+  const total = visibleItems.reduce((sum, item) => sum + item.value, 0);
+  const rows = visibleItems.map((item) => formatter.row(item, user));
+
+  return [formatter.header(user), ...rows, formatter.footer(total)]
+    .join('').trim();
+}
+\end{lstlisting}
+
+Técnicas aplicadas:
+\begin{itemize}
+  \item \textbf{Extract Method:} \texttt{selectVisibleItems} e \texttt{markPriorityItems} isolam filtragem e regra de prioridade.
+  \item \textbf{Replace Conditional with Polymorphism (Strategy):} \texttt{csvFormatter} e \texttt{htmlFormatter} expõem a mesma interface (\texttt{header}, \texttt{row}, \texttt{footer}); o \texttt{if/else} por tipo virou uma busca em tabela. Novo formato = novo objeto, sem editar o método.
+  \item \textbf{Decompose Conditional / tabela de regras:} \texttt{visibilityRules} mapeia perfil $\to$ predicado.
+  \item \textbf{Replace Magic Number with Symbolic Constant:} \texttt{PRIORITY\_THRESHOLD}, \texttt{USER\_MAX\_VALUE}, \texttt{ROLE\_ADMIN}, \texttt{ROLE\_USER}.
+  \item \textbf{Eliminação de duplicação:} formatação e soma do total ocorrem uma única vez.
+\end{itemize}
+O comportamento para entradas inesperadas foi preservado (tipo desconhecido gera relatório vazio; perfil desconhecido gera relatório sem itens).
+
+\section{Validação}
+O arquivo \texttt{tests/ReportGenerator.refactored.test.js} é cópia do teste original, alterando \textbf{apenas} o import. Resultado de \texttt{npm test}:
+
+\begin{center}
+\begin{tabular}{@{}lc@{}}
+\toprule
+Suíte & Resultado \\
+\midrule
+\texttt{ReportGenerator.refactored.test.js} & \textbf{5/5 passam} \\
+\texttt{ReportGenerator.test.js} (original) & 4/5 passam \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\texttt{npx eslint src/ReportGenerator.refactored.js}: \textbf{0 erros} (antes: 2 erros, complexidade 27).
+
+\paragraph{Observação importante.} O teste original \emph{já falhava antes de qualquer alteração} (``HTML completo para Admin''). O código original gera \texttt{<tr >} (com espaço, vindo do template quando \texttt{style} é vazio), mas o teste espera \texttt{<tr><td>1</td>...}. É um bug latente do código original, não uma regressão. A versão refatorada gera \texttt{<tr>} e \texttt{<tr style="font-weight:bold;">}, passando em todos os testes. Conforme a regra do trabalho, o arquivo e o teste originais não foram modificados.
+
+\section{Conclusão}
+A suíte de testes funcionou como rede de segurança: validou o comportamento externo (saída CSV/HTML, filtros, totais) e permitiu reescrever a estrutura interna com confiança, além de revelar um bug preexistente (\texttt{<tr >}) que a leitura do código não evidenciava. A redução dos smells (complexidade cognitiva 27 $\to$ abaixo do limite, duplicação removida, constantes nomeadas) torna o código mais legível, mais fácil de estender (novos formatos e perfis) e mais testável, pois cada parte (formatter, regra de visibilidade, prioridade) pode ser testada isoladamente.
+
+\end{document}
